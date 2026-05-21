@@ -146,10 +146,33 @@ No reboot needed — the watchdog picks up changes within 30 seconds.
   Works with WireGuard userspace mode, kernel mode, OpenVPN, etc.
 - **IPv6**: covered (own ip6tables chain mirrors the v4 chain).
 
-### Logs
+### Logs (off by default)
+
+Since v1.1.3 the module is silent by default. To enable verbose logging
+to `/data/adb/lan-killswitch.log`:
 
 ```sh
+adb shell su -c 'touch /data/adb/lan-killswitch.debug'
+# ... reproduce the issue ...
 adb shell su -c 'tail -f /data/adb/lan-killswitch.log'
+# When done:
+adb shell su -c 'rm /data/adb/lan-killswitch.debug'
+```
+
+### Boot-trace (companion diagnostic, off by default)
+
+If installed (`/data/adb/service.d/boot-trace.sh`), captures a per-boot
+state snapshot every 5s for 5 min into
+`/data/local/tmp/boot-traces/<timestamp>/` — useful for catching VPN /
+hotspot / silent-reboot anomalies post-mortem.
+
+```sh
+adb shell su -c 'touch /data/adb/boot-trace.enable'   # arm before reboot
+adb reboot
+# ... after the boot you wanted to capture ...
+adb shell su -c 'rm /data/adb/boot-trace.enable'       # disarm
+adb shell su -c 'tar czf /sdcard/traces.tgz -C /data/local/tmp boot-traces'
+adb pull /sdcard/traces.tgz
 ```
 
 ### Smoke test

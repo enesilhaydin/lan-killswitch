@@ -20,7 +20,7 @@ setsid sh -c '
     USER_CONF="'"$USER_CONF"'"
     LOCK="'"$LOCK"'"
 
-    log() { echo "[$(date +%F\ %T)] post-fs-data: $*" >> "$LOG"; }
+    log() { [ -f /data/adb/lan-killswitch.debug ] && echo "[$(date +%F\ %T)] post-fs-data: $*" >> "$LOG"; }
 
     # mkdir is atomic — acts as a process-wide mutex.
     # Steals stale lock if older than 30s (covers the case where a

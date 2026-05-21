@@ -21,7 +21,7 @@ setsid sh -c '
     USER_CONF="'"$USER_CONF"'"
     LOCK="'"$LOCK"'"
 
-    log() { echo "[$(date +%F\ %T)] service: $*" >> "$LOG"; }
+    log() { [ -f /data/adb/lan-killswitch.debug ] && echo "[$(date +%F\ %T)] service: $*" >> "$LOG"; }
 
     acquire() {
         local tries=0
