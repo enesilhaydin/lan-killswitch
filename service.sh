@@ -1,8 +1,9 @@
 #!/system/bin/sh
 # LAN Kill Switch - service hook (late_start)
-# Long-running watchdog: properly daemonized via setsid so it survives
-# Magisk's service shell exit. Re-asserts chain + FORWARD hooks every 10s
-# and reacts to link UP events via `ip monitor link` when available.
+# Properly daemonized watchdog. Re-asserts chain + FORWARD hooks every
+# 10s and reacts to link UP events via `ip monitor link`.
+# Mutex-guarded so it never races with post-fs-data or with itself
+# (periodic sweep vs. event-driven sweep).
 
 MODDIR=${0%/*}
 LOG=/data/adb/lan-killswitch.log
@@ -10,6 +11,7 @@ IPT=/system/bin/iptables
 IPT6=/system/bin/ip6tables
 CONF="$MODDIR/interfaces.conf"
 USER_CONF=/data/adb/lan-killswitch.interfaces
+LOCK=/data/adb/lan-killswitch.lock
 
 setsid sh -c '
     LOG="'"$LOG"'"
@@ -17,8 +19,26 @@ setsid sh -c '
     IPT6="'"$IPT6"'"
     CONF="'"$CONF"'"
     USER_CONF="'"$USER_CONF"'"
+    LOCK="'"$LOCK"'"
 
     log() { echo "[$(date +%F\ %T)] service: $*" >> "$LOG"; }
+
+    acquire() {
+        local tries=0
+        while ! mkdir "$LOCK" 2>/dev/null; do
+            tries=$((tries+1))
+            if [ -d "$LOCK" ]; then
+                age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
+                if [ "$age" -gt 30 ]; then
+                    rmdir "$LOCK" 2>/dev/null
+                fi
+            fi
+            sleep 1
+            [ "$tries" -gt 60 ] && return 1
+        done
+        return 0
+    }
+    release() { rmdir "$LOCK" 2>/dev/null; }
 
     ensure_chain() {
         local ipt=$1 r
@@ -35,9 +55,13 @@ setsid sh -c '
     ensure_hook() {
         local ipt=$1 iface=$2
         ip link show dev "$iface" >/dev/null 2>&1 || return 0
-        if ! $ipt -C FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; then
+        # If duplicates exist or hook is missing, normalize to exactly one.
+        local count
+        count=$($ipt -S FORWARD 2>/dev/null | grep -c "\-i $iface -j lan_killswitch$")
+        if [ "$count" -ne 1 ]; then
+            while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
             $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
-            log "re-inserted FORWARD hook on $iface ($ipt)"
+            log "normalized FORWARD hook on $iface ($ipt) [had:$count]"
         fi
     }
 
@@ -48,32 +72,29 @@ setsid sh -c '
     }
 
     sweep() {
+        acquire || return
         ensure_chain $IPT
         ensure_chain $IPT6
         for iface in $(load_ifaces); do
             ensure_hook $IPT  "$iface"
             ensure_hook $IPT6 "$iface"
         done
+        release
     }
 
-    # Wait for boot completion
     while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
-    log "boot_completed, entering watchdog (10s interval) + link-event listener"
+    log "boot_completed, entering watchdog (10s) + link-event listener"
 
-    # Fire an event-driven listener that triggers an immediate sweep
-    # whenever a link comes UP. Falls back silently if `ip monitor` is
-    # unavailable.
+    # Event-driven: immediate sweep on any link change.
     (
         ip monitor link 2>/dev/null | while read -r line; do
-            # An incoming UP event line looks like:
-            # "5: br0: <BROADCAST,MULTICAST,UP,LOWER_UP> ..."
             case "$line" in
                 *NEWLINK*|*UP*LOWER_UP*) sweep ;;
             esac
         done
     ) &
 
-    # Periodic safety net
+    # Periodic safety net.
     while true; do
         sweep
         sleep 10
