@@ -1,6 +1,6 @@
 id=lan-killswitch
 name=LAN Kill Switch
-version=v1.1.0
-versionCode=2
+version=v1.1.1
+versionCode=3
 author=eiaydin
 description=Tethering-aware VPN kill switch. Blocks hotspot / USB-tether / Wi-Fi-AP clients from reaching the internet whenever no tun* interface exists. Closes the gap that Android's built-in "Block connections without VPN" does NOT cover (it only filters the device's own apps, not forwarded tethering traffic). Toggle via Magisk Manager (requires reboot).
