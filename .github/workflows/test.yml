@@ -1,0 +1,44 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sh -n (syntax) on every shell script
+        # Catches the "broken quoting / unterminated string" class of bug,
+        # including inside the setsid blocks (a real bug this guards against).
+        run: |
+          rc=0
+          for f in *.sh test/*.sh; do
+            sh -n "$f" && echo "ok: $f" || { echo "FAIL: $f"; rc=1; }
+          done
+          exit $rc
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning test/logic-test.sh test/leak-netns.sh test/run-in-docker.sh || true
+          # module scripts use the inline setsid pattern; report but don't fail on style
+          shellcheck -S error post-fs-data.sh service.sh uninstall.sh || true
+
+  logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: logic tests (no root, mock iptables)
+        run: sh test/logic-test.sh
+
+  leak-netns:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install net tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables iputils-ping
+      - name: real packet leak test (network namespaces)
+        run: sudo sh test/leak-netns.sh

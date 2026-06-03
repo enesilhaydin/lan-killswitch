@@ -229,6 +229,36 @@ adb shell su -c 'iptables -L lan_killswitch -nv'
 
 ---
 
+### Automated tests
+
+Two layers, both run in CI (`.github/workflows/test.yml`) on every push:
+
+- **`test/leak-netns.sh`** — *real packet* leak test. Builds a throwaway
+  topology with Linux network namespaces (a client, a "cellular" egress,
+  a "VPN" `tun0`), applies the exact rules the module ships, and sends
+  real pings to assert: VPN-down → **rejected** (no leak), VPN-up →
+  forwarded, `allow-lan` permits LAN-internal but **still** blocks
+  internet, IPv6 parity, and that a foreign `ACCEPT` inserted above our
+  hooks leaks until `ensure_top` re-lifts them. Needs root + Linux; from
+  macOS/Windows just run it in Docker:
+
+  ```sh
+  sh test/run-in-docker.sh
+  ```
+
+- **`test/logic-test.sh`** — fast, no-root, no-iptables logic tests
+  (mock iptables) for the watchdog drift recovery and the config parser.
+  Runs anywhere:
+
+  ```sh
+  sh test/logic-test.sh
+  ```
+
+Both use a *contract check* that greps the rule strings out of
+`service.sh`, so the tests cannot silently drift from the real module.
+A `sh -n` pass over every script guards against the broken-quoting class
+of bug inside the `setsid` blocks.
+
 ## Why not just use the existing module's REJECT?
 
 Routing modules like `vpn-gateway` install their REJECT inside the same
