@@ -15,4 +15,8 @@ for ipt in $IPT $IPT6; do
     $ipt -X lan_killswitch 2>/dev/null
 done
 
-rm -f /data/adb/lan-killswitch.log
+rm -f  /data/adb/lan-killswitch.log
+rm -f  /data/adb/lan-killswitch.debug
+rm -f  /data/adb/lan-killswitch.allow-lan
+rm -rf /data/adb/lan-killswitch.lock
+# Note: /data/adb/lan-killswitch.interfaces (user config) is intentionally kept.

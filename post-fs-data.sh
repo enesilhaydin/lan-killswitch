@@ -65,7 +65,26 @@ setsid sh -c '
     load_ifaces() {
         local src="$USER_CONF"
         [ -f "$src" ] || src="$CONF"
-        grep -vE "^\s*(#|$)" "$src" 2>/dev/null
+        grep -vE "^[[:space:]]*(#|$)" "$src" 2>/dev/null
+    }
+
+    # Opt-in intra-LAN exception (touch /data/adb/lan-killswitch.allow-lan):
+    # permit forwarding BETWEEN local/tether interfaces while still rejecting
+    # anything bound for a non-tunnel WAN. The chain is only ever entered for
+    # -i <protected iface>, so an -o <protected iface> RETURN can only allow
+    # LAN-internal forwarding, never WAN egress. Default (no flag) = full deny.
+    sync_lan_returns() {
+        local ipt=$1 iface
+        if [ -f /data/adb/lan-killswitch.allow-lan ]; then
+            for iface in $(load_ifaces); do
+                $ipt -C lan_killswitch -o "$iface" -j RETURN 2>/dev/null \
+                    || $ipt -I lan_killswitch 1 -o "$iface" -j RETURN
+            done
+        else
+            for iface in $(load_ifaces); do
+                while $ipt -D lan_killswitch -o "$iface" -j RETURN 2>/dev/null; do : ; done
+            done
+        fi
     }
 
     # Wait until iptables is usable
@@ -94,6 +113,8 @@ setsid sh -c '
                 esac
             fi
         done
+        sync_lan_returns $IPT
+        sync_lan_returns $IPT6
         release
         [ -n "$new" ] && log "hooked$new"
         sleep 2

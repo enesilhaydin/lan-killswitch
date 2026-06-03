@@ -68,12 +68,21 @@ Android's `tetherctrl_FORWARD` chain can ACCEPT it. When no `tun*`
 interface exists, every forwarded packet from a protected interface is
 rejected.
 
-A second hook (`service.sh`) runs after `boot_completed` and re-asserts
-the rules every 30 seconds. This way:
+A second hook (`service.sh`) runs after `boot_completed` as a watchdog:
+it re-asserts the rules every 10 seconds **and** immediately on any link
+change (via `ip monitor link`). This way:
 
 - If another module flushes the FORWARD chain, we re-insert.
 - If a new tether interface comes up later (e.g. user enables USB
-  tethering hours after boot), we pick it up automatically.
+  tethering hours after boot), we pick it up within seconds.
+- **Top-position guarantee:** the watchdog does not just check that our
+  hook *exists* — it checks that all our hooks sit at the very top of
+  `FORWARD`. If another module (e.g. a VPN routing module) inserts an
+  `ACCEPT` above us after boot, a single surviving hook could otherwise
+  end up *below* it and be silently bypassed. When that drift is
+  detected, the hooks are lifted back to the top without ever opening a
+  leak gap (fresh copies inserted on top first, stale copies removed
+  after).
 
 The design is **independent of the VPN client lifecycle**. Whether the
 tunnel is up, down, restarting, or never been started, the rule stays in
@@ -129,7 +138,36 @@ Check which interfaces are up while tethering is on:
 adb shell su -c 'ip -br link show up'
 ```
 
-No reboot needed — the watchdog picks up changes within 30 seconds.
+No reboot needed — the watchdog picks up changes within 10 seconds.
+
+### Local / intra-LAN traffic (opt-in)
+
+By default the switch is **fully deny**: when no tunnel is up, *every*
+forwarded packet from a protected interface is rejected — including
+traffic forwarded between two local/tether interfaces (e.g. a Wi-Fi
+client talking to a USB-tethered device).
+
+Note this rarely matters in practice:
+
+- Client ↔ phone (DHCP, DNS, gateway) is `INPUT`/`OUTPUT`, never
+  `FORWARD` — it is **not** affected, so clients always keep their lease
+  and can reach the phone.
+- Client ↔ client on the *same* bridge/subnet is switched at L2 and
+  never enters the IP `FORWARD` chain — also unaffected.
+- Only *cross-interface* forwarding (different L3 segments) is cut.
+
+If you want that cross-interface LAN traffic to keep flowing while the
+tunnel is down (it is never an internet leak — it stays on the LAN),
+opt in:
+
+```sh
+adb shell su -c 'touch /data/adb/lan-killswitch.allow-lan'
+# revert to full deny:
+adb shell su -c 'rm /data/adb/lan-killswitch.allow-lan'
+```
+
+The watchdog applies/removes the exception on its next sweep (≤10s); no
+reboot needed. Internet egress stays rejected either way.
 
 ---
 

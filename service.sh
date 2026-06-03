@@ -68,7 +68,60 @@ setsid sh -c '
     load_ifaces() {
         local src="$USER_CONF"
         [ -f "$src" ] || src="$CONF"
-        grep -vE "^\s*(#|$)" "$src" 2>/dev/null
+        grep -vE "^[[:space:]]*(#|$)" "$src" 2>/dev/null
+    }
+
+    # Opt-in intra-LAN exception (touch /data/adb/lan-killswitch.allow-lan):
+    # permit forwarding BETWEEN local/tether interfaces while still rejecting
+    # anything bound for a non-tunnel WAN. The chain is only ever entered for
+    # -i <protected iface>, so an -o <protected iface> RETURN can only allow
+    # LAN-internal forwarding, never WAN egress. Default (no flag) = full deny.
+    # Toggling the flag is picked up on the next sweep (<=10s), no reboot.
+    sync_lan_returns() {
+        local ipt=$1 iface
+        if [ -f /data/adb/lan-killswitch.allow-lan ]; then
+            for iface in $(load_ifaces); do
+                $ipt -C lan_killswitch -o "$iface" -j RETURN 2>/dev/null \
+                    || { $ipt -I lan_killswitch 1 -o "$iface" -j RETURN; log "allow-lan: +$iface ($ipt)"; }
+            done
+        else
+            for iface in $(load_ifaces); do
+                while $ipt -D lan_killswitch -o "$iface" -j RETURN 2>/dev/null; do : ; done
+            done
+        fi
+    }
+
+    # Guarantee all of our FORWARD hooks sit at the very top, above any ACCEPT
+    # another module (e.g. a VPN routing module) may have inserted after us.
+    # Checking only "exactly one hook exists" is not enough: a single hook can
+    # still end up *below* a foreign ACCEPT and be silently bypassed.
+    ensure_top() {
+        local ipt=$1 total topc tmp line iface
+        total=$($ipt -S FORWARD 2>/dev/null | grep -c -- "-j lan_killswitch")
+        [ "$total" -eq 0 ] && return 0
+        # Count how many of the LEADING FORWARD rules are ours (contiguous from
+        # the top). Read from a temp file, not a pipe, so the counter survives.
+        tmp=/data/adb/lan-killswitch.fwd.$$
+        $ipt -S FORWARD 2>/dev/null | grep "^-A FORWARD" > "$tmp"
+        topc=0
+        while IFS= read -r line; do
+            case "$line" in
+                *"-j lan_killswitch") topc=$((topc+1)) ;;
+                *) break ;;
+            esac
+        done < "$tmp"
+        rm -f "$tmp"
+        [ "$topc" -eq "$total" ] && return 0
+        # Drift: a foreign rule sits above one of our hooks. We hold the mutex,
+        # so re-lift cleanly: drop every hook, then reinsert each configured +
+        # present interface at position 1 (back on top).
+        for iface in $(load_ifaces); do
+            while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
+        done
+        for iface in $(load_ifaces); do
+            ip link show dev "$iface" >/dev/null 2>&1 && $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
+        done
+        log "lifted hooks back to top ($ipt) [was $topc/$total]"
     }
 
     sweep() {
@@ -79,6 +132,10 @@ setsid sh -c '
             ensure_hook $IPT  "$iface"
             ensure_hook $IPT6 "$iface"
         done
+        sync_lan_returns $IPT
+        sync_lan_returns $IPT6
+        ensure_top $IPT
+        ensure_top $IPT6
         release
     }
 
