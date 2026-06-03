@@ -47,8 +47,24 @@ trap cleanup EXIT
 
 setp() { echo "$2" > "/proc/sys/$1" 2>/dev/null; }
 
+# The host may have FORWARD rules in the OTHER iptables backend (e.g. CI runners
+# with Docker installed set an nft FORWARD policy of DROP). The kernel runs both
+# legacy and nft hooks, so a packet our legacy chain RETURNs can still be dropped
+# by the nft policy. Neutralize FORWARD + nat on every backend so the only thing
+# governing forwarding is the rules we install. (Run via run-in-docker.sh / CI;
+# do not run on a host whose root-ns firewall you care about.)
+neutralize_backends() {
+    for b in iptables-legacy iptables-nft iptables ip6tables-legacy ip6tables-nft ip6tables; do
+        command -v "$b" >/dev/null 2>&1 || continue
+        "$b" -P FORWARD ACCEPT 2>/dev/null
+        "$b" -F FORWARD       2>/dev/null
+        "$b" -t nat -F        2>/dev/null
+    done
+}
+
 build_topology() {
     cleanup
+    neutralize_backends
     ip netns add client
     ip netns add client2
     ip netns add wan
