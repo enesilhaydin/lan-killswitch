@@ -105,9 +105,12 @@ build_topology() {
     ip netns exec wan ip addr add 2001:db8::9/128 dev lo nodad
 
     setp net/ipv4/ip_forward 1
-    setp net/ipv4/conf/all/rp_filter 0
-    setp net/ipv4/conf/default/rp_filter 0
     setp net/ipv6/conf/all/forwarding 1
+    # rp_filter is IPv4-only and per-interface; the effective value is
+    # max(all, <iface>). Some hosts (e.g. GitHub's ubuntu runners) default it
+    # to strict (1), which drops our NAT'd return path. Force 0 on every
+    # interface that now exists, so forwarding works regardless of host default.
+    for rpf in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$rpf" 2>/dev/null; done
 
     # NAT so the client's private address can reach the wan host on either egress.
     $IPT  -t nat -F
