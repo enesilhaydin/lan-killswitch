@@ -1,17 +1,18 @@
 # companion helpers
 
-These are **optional** `/data/adb/service.d/` scripts that solve problems in
-the *VPN routing* layer. They are **not** part of the lan-killswitch Magisk
-module and are **not** in the release zip — the kill switch works without them.
-Install them only if you hit the specific symptom each one addresses.
+These are optional `/data/adb/service.d/` scripts that solve problems in the
+*VPN routing* layer. Since lan-killswitch v1.2.2, the WireGuard endpoint-loop
+guard is built into the Magisk module as `endpoint-guard.sh`. Since v1.2.4, the
+`tun+` MASQUERADE keepalive is also built in. The copies here are kept for older
+installs and one-off testing.
 
 Both are **safe**: they act only when a fault is actually present, do nothing
 when healthy, and never guess in a way that could blackhole traffic.
 
 | Script | Symptom it fixes |
 |---|---|
-| `vpn-endpoint-guard.sh` | Hotspot internet works ~20-60s after connecting, then **dies permanently** (VPN routing-loop on the WG endpoint). |
-| `vpn-gateway-watchdog.sh` | VPN shows connected but hotspot has **no internet at all**, often after an APN cycle (MASQUERADE flushed by NetD). |
+| `vpn-endpoint-guard.sh` | Older standalone copy of the v1.2.2 built-in endpoint guard. Hotspot internet works ~20-60s after connecting, then **dies permanently** (VPN routing-loop on the WG endpoint). |
+| `vpn-gateway-watchdog.sh` | Older standalone copy of the v1.2.4 built-in MASQUERADE keepalive. VPN shows connected but hotspot has **no internet at all**, often after an APN cycle. |
 
 ## vpn-endpoint-guard.sh
 

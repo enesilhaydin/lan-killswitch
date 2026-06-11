@@ -68,21 +68,30 @@ Android's `tetherctrl_FORWARD` chain can ACCEPT it. When no `tun*`
 interface exists, every forwarded packet from a protected interface is
 rejected.
 
-A second hook (`service.sh`) runs after `boot_completed` as a watchdog:
-it re-asserts the rules every 10 seconds **and** immediately on any link
-change (via `ip monitor link`). This way:
+A second hook (`service.sh`) runs after `boot_completed` as a passive watchdog:
+it re-asserts the kill-switch hook on a slow cadence, only when the hook is
+missing or duplicated. This way:
 
 - If another module flushes the FORWARD chain, we re-insert.
 - If a new tether interface comes up later (e.g. user enables USB
-  tethering hours after boot), we pick it up within seconds.
-- **Top-position guarantee:** the watchdog does not just check that our
-  hook *exists* — it checks that all our hooks sit at the very top of
-  `FORWARD`. If another module (e.g. a VPN routing module) inserts an
-  `ACCEPT` above us after boot, a single surviving hook could otherwise
-  end up *below* it and be silently bypassed. When that drift is
-  detected, the hooks are lifted back to the top without ever opening a
-  leak gap (fresh copies inserted on top first, stale copies removed
-  after).
+  tethering hours after boot), we pick it up on the next sweep.
+- We avoid route/link event churn, so the module does not fight VPN routing
+  helpers over iptables ordering.
+
+Since v1.2.2, `service.sh` also starts `endpoint-guard.sh`. That guard fixes
+the ZTE F50 / Mullvad failure where the WireGuard server endpoint itself
+resolves through `tun0`; it pins the endpoint `/32` into the same policy table
+via the cellular uplink, but only when the loop is actually detected.
+
+Since v1.2.3, the watchdog also keeps two `mangle/FORWARD` TCPMSS clamp rules
+alive for `tun+` forwarding. This fixes the case where IP connectivity works
+but larger TCP flows such as web pages or speed tests intermittently hang
+because the forwarded client keeps an MSS too large for the VPN path.
+
+Since v1.2.4, the watchdog also keeps a single `nat/POSTROUTING -o tun+
+-j MASQUERADE` rule alive. This is required by strict tunnel providers such as
+Mullvad, which expect forwarded hotspot packets to use the tunnel address
+instead of a LAN source like `192.168.0.x`.
 
 The design is **independent of the VPN client lifecycle**. Whether the
 tunnel is up, down, restarting, or never been started, the rule stays in
@@ -182,7 +191,22 @@ reboot needed. Internet egress stays rejected either way.
   on; they cover different traffic classes.
 - **No `tun0` hardcoding** — `-o tun+` matches `tun0`, `tun1`, anything.
   Works with WireGuard userspace mode, kernel mode, OpenVPN, etc.
+- **WireGuard endpoint loop guard**: v1.2.2 pins a looped IPv4 WireGuard
+  endpoint route back to the cellular interface on ZTE-style policy routing.
+- **TCP MSS clamp**: v1.2.3 clamps forwarded TCP SYNs on `tun+` paths to avoid
+  MTU blackholes over full-tunnel hotspot VPN.
+- **Tunnel MASQUERADE**: v1.2.4 keeps `-o tun+ -j MASQUERADE` present for
+  strict providers such as Mullvad. It does not add APN/cellular NAT rules.
 - **IPv6**: covered (own ip6tables chain mirrors the v4 chain).
+
+### WireGuard scope
+
+The core kill switch, TCP MSS clamp, and `tun+` MASQUERADE rules are generic for
+VPN clients that expose a `tun*` interface. The endpoint-loop guard is
+WireGuard-specific: it reads IPv4 `Endpoint = x.x.x.x:port` entries from the
+WireGuard Android config directory and pins those endpoint routes if they loop
+back through `tun*`. This release is designed and tested for the ZTE F50 +
+WireGuard + Mullvad + `vpn-gateway` setup.
 
 ### Logs (off by default)
 
@@ -305,20 +329,20 @@ exists *outside* that cycle so it can survive tunnel drops.
 
 ## Companion helpers (optional, VPN routing layer)
 
-The kill switch protects the *tether* path. Two separate, common faults live in
-the *VPN routing* layer — not this module's job, but they look like "the hotspot
-broke," so optional self-healing helpers are provided under
-[`companion/`](companion/):
+The kill switch protects the *tether* path. Some faults live in the *VPN
+routing* layer and look like "the hotspot broke." v1.2.2 now includes the
+WireGuard endpoint-loop guard directly, and v1.2.4 includes the `tun+`
+MASQUERADE keepalive directly. The standalone helpers under
+[`companion/`](companion/) are kept for older installs and diagnostics:
 
 | Helper | Fixes |
 |---|---|
-| `vpn-endpoint-guard.sh` | Hotspot works ~20-60s after connecting then **dies** — the WireGuard server endpoint's route loops back through `tun0`, so the handshake can't refresh. The guard pins a `/32` host route to the endpoint via cellular whenever it detects the loop. |
-| `vpn-gateway-watchdog.sh` | VPN connected but hotspot has **no internet** (often after an APN cycle) — NetD flushed the `tun0` MASQUERADE the routing module needs. The watchdog re-asserts it. |
+| `endpoint-guard.sh` | Built into the module since v1.2.2. Hotspot works ~20-60s after connecting then **dies** because the WireGuard server endpoint route loops back through `tun0`. |
+| `vpn-gateway-watchdog.sh` | Older standalone copy of the v1.2.4 built-in MASQUERADE keepalive. VPN connected but hotspot has **no internet** after NetD flushes the `tun0` MASQUERADE rule. |
 
 Both are zero-touch when healthy and safe-fail (do nothing if they can't act
-safely). They are **not** in the Magisk zip; install per
-[`companion/README.md`](companion/README.md). Confirm you need them first with
-`scripts/diag.sh` (look for `wg_endpoint_via_tunnel=LOOP_BAD`).
+safely). Install the MASQUERADE helper per
+[`companion/README.md`](companion/README.md) only if you need it.
 
 ## License
 

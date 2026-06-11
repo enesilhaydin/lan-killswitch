@@ -35,6 +35,9 @@ CONF="$MODDIR/interfaces.conf"
 USER_CONF=/data/adb/lan-killswitch.interfaces
 LOCK=/data/adb/lan-killswitch.lock
 INTERVAL=60
+ENDPOINT_GUARD="$MODDIR/endpoint-guard.sh"
+
+[ -f "$ENDPOINT_GUARD" ] && sh "$ENDPOINT_GUARD"
 
 setsid sh -c '
     LOG="'"$LOG"'"
@@ -125,10 +128,51 @@ setsid sh -c '
         fi
     }
 
+    # Full-tunnel VPN + cellular hotspots can blackhole larger TCP flows when
+    # forwarded clients keep an MSS too large for the VPN path. Clamp SYN MSS on
+    # both directions of tun+ forwarding. Idempotent, and de-duplicates if a
+    # previous service run left more than one copy.
+    ensure_mss_rule() {
+        local ipt=$1 dir=$2 count
+        count=$($ipt -t mangle -S FORWARD 2>/dev/null | grep -c -- "$dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu$")
+        if [ "$count" -eq 0 ]; then
+            $ipt -t mangle -I FORWARD 1 $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+            log "installed TCPMSS clamp $dir tun+"
+        elif [ "$count" -gt 1 ]; then
+            while $ipt -t mangle -D FORWARD $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do : ; done
+            $ipt -t mangle -I FORWARD 1 $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+            log "de-duplicated TCPMSS clamp $dir tun+ [had:$count]"
+        fi
+    }
+
+    ensure_mss_clamp() {
+        ensure_mss_rule "$1" -o
+        ensure_mss_rule "$1" -i
+    }
+
+    # Mullvad and other strict providers expect forwarded hotspot packets to
+    # leave the tunnel with the tunnel address, not a LAN source like
+    # 192.168.0.x. This is only NAT on tun+ egress; it never creates an APN
+    # accept/NAT path.
+    ensure_tun_masquerade() {
+        local ipt=$1 count
+        count=$($ipt -t nat -S POSTROUTING 2>/dev/null | grep -c -- "-o tun+ -j MASQUERADE$")
+        if [ "$count" -eq 0 ]; then
+            $ipt -t nat -I POSTROUTING 1 -o tun+ -j MASQUERADE
+            log "installed tun+ MASQUERADE"
+        elif [ "$count" -gt 1 ]; then
+            while $ipt -t nat -D POSTROUTING -o tun+ -j MASQUERADE 2>/dev/null; do : ; done
+            $ipt -t nat -I POSTROUTING 1 -o tun+ -j MASQUERADE
+            log "de-duplicated tun+ MASQUERADE [had:$count]"
+        fi
+    }
+
     sweep() {
         acquire || return
         ensure_chain $IPT
         ensure_chain $IPT6
+        ensure_mss_clamp $IPT
+        ensure_tun_masquerade $IPT
         for iface in $(load_ifaces); do
             ensure_hook $IPT  "$iface"
             ensure_hook $IPT6 "$iface"

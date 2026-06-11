@@ -35,6 +35,14 @@ grep -q -- '-C lan_killswitch -o tun+ -j RETURN' "$MOD/service.sh"     || bad "s
 grep -q -- '-C lan_killswitch -o tun+ -j RETURN' "$MOD/post-fs-data.sh"|| bad "post-fs-data.sh: ensure_chain butunluk kontrolu yok"
 grep -q -- "\[\[:space:\]\]"          "$MOD/service.sh"     || bad "service.sh: [[:space:]] yok"
 grep -q -- "\[\[:space:\]\]"          "$MOD/post-fs-data.sh"|| bad "post-fs-data.sh: [[:space:]] yok"
+grep -q -- "endpoint-guard.sh"        "$MOD/service.sh"     || bad "service.sh: endpoint guard baslatmiyor"
+[ -f "$MOD/endpoint-guard.sh" ]                              || bad "endpoint-guard.sh yok"
+grep -q -- "--clamp-mss-to-pmtu"      "$MOD/service.sh"     || bad "service.sh: TCPMSS clamp yok"
+[ "$(grep -c -- "--clamp-mss-to-pmtu" "$MOD/service.sh")" -ge 2 ] || bad "service.sh: iki yonlu TCPMSS clamp yok"
+grep -q -- "--clamp-mss-to-pmtu"      "$MOD/uninstall.sh"   || bad "uninstall.sh: TCPMSS clamp temizlemiyor"
+grep -q -- "lan-killswitch-endpoint-guard.pid" "$MOD/uninstall.sh" || bad "uninstall.sh: endpoint guard pid temizlemiyor"
+grep -q -- "-j MASQUERADE"            "$MOD/service.sh"     || bad "service.sh: tun+ MASQUERADE yok"
+grep -q -- "-j MASQUERADE"            "$MOD/uninstall.sh"   || bad "uninstall.sh: tun+ MASQUERADE temizlemiyor"
 [ "$fail" -eq 0 ] && ok "rule/function contract"
 
 # --- 1) load_ifaces: comments (incl. indented), blanks filtered -------------
@@ -95,6 +103,112 @@ printf -- '-A FORWARD -i br0 -j lan_killswitch\n-A FORWARD -i br0 -j lan_killswi
 ensure_hook ipt br0
 n=$(grep -c "lan_killswitch" "$ST")
 eq "duplikasyon tek hook'a indirgendi" "$n" "1"
+rm -f "$ST" "$ST".* 2>/dev/null
+
+# --- 3) ensure_mss_clamp: install-if-missing, idempotent, de-duplicate -------
+echo "[3] ensure_mss_clamp (mock iptables mangle)"
+ST=$(mktemp 2>/dev/null || echo /tmp/lks_mangle.$$)
+: > "$ST"
+ipt_mangle() {
+    case "$*" in
+        "-t mangle -S FORWARD")
+            echo "-P FORWARD ACCEPT"
+            cat "$ST"
+            ;;
+        "-t mangle -I FORWARD 1"*)
+            set -- $*
+            shift 5
+            { echo "-A FORWARD $*"; cat "$ST"; } > "$ST.t" && mv "$ST.t" "$ST"
+            ;;
+        "-t mangle -D FORWARD"*)
+            set -- $*
+            shift 4
+            pat="-A FORWARD $*"; removed=0; : > "$ST.t"
+            while IFS= read -r ln; do
+                if [ "$removed" -eq 0 ] && [ "$ln" = "$pat" ]; then removed=1; continue; fi
+                printf '%s\n' "$ln" >> "$ST.t"
+            done < "$ST"; mv "$ST.t" "$ST"; [ "$removed" -eq 1 ]
+            ;;
+    esac
+}
+
+ensure_mss_rule() {
+    local ipt=$1 dir=$2 count
+    count=$($ipt -t mangle -S FORWARD 2>/dev/null | grep -c -- "$dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu$")
+    if [ "$count" -eq 0 ]; then
+        $ipt -t mangle -I FORWARD 1 $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    elif [ "$count" -gt 1 ]; then
+        while $ipt -t mangle -D FORWARD $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do : ; done
+        $ipt -t mangle -I FORWARD 1 $dir tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    fi
+}
+ensure_mss_clamp() {
+    ensure_mss_rule "$1" -o
+    ensure_mss_rule "$1" -i
+}
+
+ensure_mss_clamp ipt_mangle
+n=$(grep -c "TCPMSS --clamp-mss-to-pmtu" "$ST")
+eq "MSS clamp iki yon eklendi" "$n" "2"
+before=$(cat "$ST")
+ensure_mss_clamp ipt_mangle
+after=$(cat "$ST")
+eq "MSS clamp tek kopyayken idempotent" "$after" "$before"
+printf -- '-A FORWARD -o tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n-A FORWARD -o tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n-A FORWARD -i tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n-A FORWARD -i tun+ -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n' > "$ST"
+ensure_mss_clamp ipt_mangle
+n=$(grep -c "TCPMSS --clamp-mss-to-pmtu" "$ST")
+eq "MSS clamp duplikasyonlari temizlendi" "$n" "2"
+rm -f "$ST" "$ST".* 2>/dev/null
+
+# --- 4) ensure_tun_masquerade: install-if-missing, idempotent, de-duplicate ---
+echo "[4] ensure_tun_masquerade (mock iptables nat)"
+ST=$(mktemp 2>/dev/null || echo /tmp/lks_nat.$$)
+: > "$ST"
+ipt_nat() {
+    case "$*" in
+        "-t nat -S POSTROUTING")
+            echo "-P POSTROUTING ACCEPT"
+            cat "$ST"
+            ;;
+        "-t nat -I POSTROUTING 1"*)
+            set -- $*
+            shift 5
+            { echo "-A POSTROUTING $*"; cat "$ST"; } > "$ST.t" && mv "$ST.t" "$ST"
+            ;;
+        "-t nat -D POSTROUTING"*)
+            set -- $*
+            shift 4
+            pat="-A POSTROUTING $*"; removed=0; : > "$ST.t"
+            while IFS= read -r ln; do
+                if [ "$removed" -eq 0 ] && [ "$ln" = "$pat" ]; then removed=1; continue; fi
+                printf '%s\n' "$ln" >> "$ST.t"
+            done < "$ST"; mv "$ST.t" "$ST"; [ "$removed" -eq 1 ]
+            ;;
+    esac
+}
+
+ensure_tun_masquerade() {
+    local ipt=$1 count
+    count=$($ipt -t nat -S POSTROUTING 2>/dev/null | grep -c -- "-o tun+ -j MASQUERADE$")
+    if [ "$count" -eq 0 ]; then
+        $ipt -t nat -I POSTROUTING 1 -o tun+ -j MASQUERADE
+    elif [ "$count" -gt 1 ]; then
+        while $ipt -t nat -D POSTROUTING -o tun+ -j MASQUERADE 2>/dev/null; do : ; done
+        $ipt -t nat -I POSTROUTING 1 -o tun+ -j MASQUERADE
+    fi
+}
+
+ensure_tun_masquerade ipt_nat
+n=$(grep -c "MASQUERADE" "$ST")
+eq "tun+ MASQUERADE eklendi" "$n" "1"
+before=$(cat "$ST")
+ensure_tun_masquerade ipt_nat
+after=$(cat "$ST")
+eq "tun+ MASQUERADE tek kopyayken idempotent" "$after" "$before"
+printf -- '-A POSTROUTING -o tun+ -j MASQUERADE\n-A POSTROUTING -o tun+ -j MASQUERADE\n-A POSTROUTING -j tetherctrl_nat_POSTROUTING\n' > "$ST"
+ensure_tun_masquerade ipt_nat
+n=$(grep -c "MASQUERADE" "$ST")
+eq "tun+ MASQUERADE duplikasyonlari temizlendi" "$n" "1"
 rm -f "$ST" "$ST".* 2>/dev/null
 
 echo
