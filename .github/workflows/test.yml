@@ -42,3 +42,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables iputils-ping
       - name: real packet leak test (network namespaces)
         run: sudo sh test/leak-netns.sh
+
+  repro-endpoint-loop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install net tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2
+      - name: WG endpoint routing-loop repro + diag detector check
+        run: sudo sh test/repro-endpoint-loop.sh
