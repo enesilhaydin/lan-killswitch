@@ -1,9 +1,31 @@
 #!/system/bin/sh
 # LAN Kill Switch - service hook (late_start)
-# Properly daemonized watchdog. Re-asserts chain + FORWARD hooks every
-# 10s and reacts to link UP events via `ip monitor link`.
-# Mutex-guarded so it never races with post-fs-data or with itself
-# (periodic sweep vs. event-driven sweep).
+#
+# Lightweight, passive watchdog.
+#
+# Design rationale (v1.2.0): the FORWARD hook, once installed at boot, is
+# effectively permanent. NetD does NOT flush custom-chain jumps living in the
+# FORWARD chain (it only rewrites the chains it owns: tetherctrl_*, nat
+# POSTROUTING, bw_*). vpn-gateway only ADDS its own rules; it never deletes
+# ours. So in practice the hook simply does not disappear after boot.
+#
+# Because of that, this watchdog deliberately does NOT:
+#   - police rule ORDER (hook position is irrelevant to correctness — proof
+#     below), and
+#   - react to every link event (that caused an ip-monitor sweep storm that
+#     fought vpn-gateway over the FORWARD top slot, churning iptables and
+#     hurting network stability).
+#
+# Why position doesn't matter: every vpn-gateway ACCEPT is qualified with
+# -o tun0 / -i tun0, i.e. it only matches traffic that SHOULD pass while the
+# VPN is up. With the VPN down, tun0 has no route, those ACCEPTs can't match,
+# and the packet still reaches our REJECT. With the VPN up, the packet is
+# meant to pass anyway. So whether our hook sits above or below vpn-gateway's
+# rules, the verdict is identical: blocked when VPN down, allowed when VPN up.
+#
+# The watchdog therefore only re-installs the hook on the rare chance it is
+# genuinely MISSING, on a slow 60s cadence, and touches iptables ONLY when
+# something is actually absent or duplicated. Steady state = zero writes.
 
 MODDIR=${0%/*}
 LOG=/data/adb/lan-killswitch.log
@@ -12,6 +34,7 @@ IPT6=/system/bin/ip6tables
 CONF="$MODDIR/interfaces.conf"
 USER_CONF=/data/adb/lan-killswitch.interfaces
 LOCK=/data/adb/lan-killswitch.lock
+INTERVAL=60
 
 setsid sh -c '
     LOG="'"$LOG"'"
@@ -20,18 +43,18 @@ setsid sh -c '
     CONF="'"$CONF"'"
     USER_CONF="'"$USER_CONF"'"
     LOCK="'"$LOCK"'"
+    INTERVAL='"$INTERVAL"'
 
     log() { [ -f /data/adb/lan-killswitch.debug ] && echo "[$(date +%F\ %T)] service: $*" >> "$LOG"; }
 
+    # mkdir is atomic — mutex against post-fs-data during the first ~90s.
     acquire() {
         local tries=0
         while ! mkdir "$LOCK" 2>/dev/null; do
             tries=$((tries+1))
             if [ -d "$LOCK" ]; then
                 age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
-                if [ "$age" -gt 30 ]; then
-                    rmdir "$LOCK" 2>/dev/null
-                fi
+                [ "$age" -gt 30 ] && rmdir "$LOCK" 2>/dev/null
             fi
             sleep 1
             [ "$tries" -gt 60 ] && return 1
@@ -52,16 +75,19 @@ setsid sh -c '
         fi
     }
 
+    # Idempotent. Writes ONLY when the hook is missing (count 0) or somehow
+    # duplicated (count >1). count==1 -> no iptables write at all.
     ensure_hook() {
-        local ipt=$1 iface=$2
+        local ipt=$1 iface=$2 count
         ip link show dev "$iface" >/dev/null 2>&1 || return 0
-        # If duplicates exist or hook is missing, normalize to exactly one.
-        local count
-        count=$($ipt -S FORWARD 2>/dev/null | grep -c "\-i $iface -j lan_killswitch$")
-        if [ "$count" -ne 1 ]; then
+        count=$($ipt -S FORWARD 2>/dev/null | grep -c -- "-i $iface -j lan_killswitch$")
+        if [ "$count" -eq 0 ]; then
+            $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
+            log "installed missing FORWARD hook on $iface ($ipt)"
+        elif [ "$count" -gt 1 ]; then
             while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
             $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
-            log "normalized FORWARD hook on $iface ($ipt) [had:$count]"
+            log "de-duplicated FORWARD hook on $iface ($ipt) [had:$count]"
         fi
     }
 
@@ -73,55 +99,23 @@ setsid sh -c '
 
     # Opt-in intra-LAN exception (touch /data/adb/lan-killswitch.allow-lan):
     # permit forwarding BETWEEN local/tether interfaces while still rejecting
-    # anything bound for a non-tunnel WAN. The chain is only ever entered for
-    # -i <protected iface>, so an -o <protected iface> RETURN can only allow
-    # LAN-internal forwarding, never WAN egress. Default (no flag) = full deny.
-    # Toggling the flag is picked up on the next sweep (<=10s), no reboot.
+    # anything bound for a non-tunnel WAN. Idempotent: only writes when the
+    # desired state differs from the current chain (zero writes in steady state).
     sync_lan_returns() {
         local ipt=$1 iface
         if [ -f /data/adb/lan-killswitch.allow-lan ]; then
             for iface in $(load_ifaces); do
                 $ipt -C lan_killswitch -o "$iface" -j RETURN 2>/dev/null \
-                    || { $ipt -I lan_killswitch 1 -o "$iface" -j RETURN; log "allow-lan: +$iface ($ipt)"; }
+                    || { $ipt -I lan_killswitch 1 -o "$iface" -j RETURN; log "allow-lan +$iface ($ipt)"; }
             done
         else
             for iface in $(load_ifaces); do
-                while $ipt -D lan_killswitch -o "$iface" -j RETURN 2>/dev/null; do : ; done
+                if $ipt -C lan_killswitch -o "$iface" -j RETURN 2>/dev/null; then
+                    while $ipt -D lan_killswitch -o "$iface" -j RETURN 2>/dev/null; do : ; done
+                    log "allow-lan -$iface ($ipt)"
+                fi
             done
         fi
-    }
-
-    # Guarantee all of our FORWARD hooks sit at the very top, above any ACCEPT
-    # another module (e.g. a VPN routing module) may have inserted after us.
-    # Checking only "exactly one hook exists" is not enough: a single hook can
-    # still end up *below* a foreign ACCEPT and be silently bypassed.
-    ensure_top() {
-        local ipt=$1 total topc tmp line iface
-        total=$($ipt -S FORWARD 2>/dev/null | grep -c -- "-j lan_killswitch")
-        [ "$total" -eq 0 ] && return 0
-        # Count how many of the LEADING FORWARD rules are ours (contiguous from
-        # the top). Read from a temp file, not a pipe, so the counter survives.
-        tmp=/data/adb/lan-killswitch.fwd.$$
-        $ipt -S FORWARD 2>/dev/null | grep "^-A FORWARD" > "$tmp"
-        topc=0
-        while IFS= read -r line; do
-            case "$line" in
-                *"-j lan_killswitch") topc=$((topc+1)) ;;
-                *) break ;;
-            esac
-        done < "$tmp"
-        rm -f "$tmp"
-        [ "$topc" -eq "$total" ] && return 0
-        # Drift: a foreign rule sits above one of our hooks. We hold the mutex,
-        # so re-lift cleanly: drop every hook, then reinsert each configured +
-        # present interface at position 1 (back on top).
-        for iface in $(load_ifaces); do
-            while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
-        done
-        for iface in $(load_ifaces); do
-            ip link show dev "$iface" >/dev/null 2>&1 && $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
-        done
-        log "lifted hooks back to top ($ipt) [was $topc/$total]"
     }
 
     sweep() {
@@ -134,27 +128,15 @@ setsid sh -c '
         done
         sync_lan_returns $IPT
         sync_lan_returns $IPT6
-        ensure_top $IPT
-        ensure_top $IPT6
         release
     }
 
     while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
-    log "boot_completed, entering watchdog (10s) + link-event listener"
+    log "boot_completed, watchdog active (${INTERVAL}s, passive — no order policing, no link listener)"
 
-    # Event-driven: immediate sweep on any link change.
-    (
-        ip monitor link 2>/dev/null | while read -r line; do
-            case "$line" in
-                *NEWLINK*|*UP*LOWER_UP*) sweep ;;
-            esac
-        done
-    ) &
-
-    # Periodic safety net.
     while true; do
         sweep
-        sleep 10
+        sleep "$INTERVAL"
     done
 ' </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null

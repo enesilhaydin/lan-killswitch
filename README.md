@@ -259,6 +259,40 @@ Both use a *contract check* that greps the rule strings out of
 A `sh -n` pass over every script guards against the broken-quoting class
 of bug inside the `setsid` blocks.
 
+## Why the watchdog is passive (v1.2.0)
+
+Earlier versions ran an aggressive watchdog: a 10s sweep **plus** an
+`ip monitor link` listener, both of which policed rule *order* and re-lifted
+the hook to the top of `FORWARD` whenever another module's rule appeared
+above it. On a device also running a VPN routing module (vpn-gateway), this
+turned into a tug-of-war over the top slot — constant `iptables -D/-I`
+churn, high CPU, and brief windows where the kill switch was momentarily
+removed during the delete-then-reinsert. The cure was worse than the
+disease.
+
+v1.2.0 makes the watchdog **passive**:
+
+- **No order policing.** Hook position is irrelevant to correctness. Every
+  vpn-gateway ACCEPT is qualified with `-o tun0` / `-i tun0`, so it only
+  matches traffic that should pass while the VPN is up. With the VPN down,
+  `tun0` has no route, those ACCEPTs can't match, and the packet still
+  reaches our REJECT. Whether our hook is above or below them, the verdict
+  is identical: **blocked when VPN down, allowed when VPN up.**
+- **No link-event listener.** The `ip monitor` sweep storm is gone.
+- **Slow 60s cadence, zero-write steady state.** The watchdog only writes to
+  iptables when a hook is genuinely *missing* or *duplicated*. If everything
+  is in place (the normal case), it performs read-only checks and touches
+  nothing — so it can't destabilise the network.
+
+The FORWARD hook is installed once at boot (`post-fs-data` + 90s retry) and,
+in practice, never disappears afterward: NetD does not flush custom-chain
+jumps in `FORWARD`, and vpn-gateway only adds rules, never removes ours. The
+60s watchdog is just a cheap safety net for the rare exception.
+
+> Note: the MASQUERADE rule a VPN routing module needs *does* get flushed by
+> NetD on cellular re-init (APN cycle), but that is the routing module's
+> concern, not this kill switch's. Keep that rule under its own watchdog.
+
 ## Why not just use the existing module's REJECT?
 
 Routing modules like `vpn-gateway` install their REJECT inside the same

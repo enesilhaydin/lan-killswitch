@@ -53,12 +53,19 @@ setsid sh -c '
         fi
     }
 
-    # Force-idempotent: delete every existing instance, insert exactly one.
+    # Idempotent: install exactly one hook. If already present once, do not
+    # touch iptables (avoids needless churn across the 90s retry loop). Only
+    # rewrites when missing (count 0) or duplicated (count >1).
     hook_interface() {
-        local ipt=$1 iface=$2
+        local ipt=$1 iface=$2 count
         ip link show dev "$iface" >/dev/null 2>&1 || return 1
-        while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
-        $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
+        count=$($ipt -S FORWARD 2>/dev/null | grep -c -- "-i $iface -j lan_killswitch$")
+        if [ "$count" -eq 0 ]; then
+            $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
+        elif [ "$count" -gt 1 ]; then
+            while $ipt -D FORWARD -i "$iface" -j lan_killswitch 2>/dev/null; do : ; done
+            $ipt -I FORWARD 1 -i "$iface" -j lan_killswitch
+        fi
         return 0
     }
 
