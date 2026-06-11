@@ -112,5 +112,16 @@ echo "    -> guard re-pins the endpoint to cellular within one ${INTERVAL:-20}s 
 echo "       so the handshake never stays looped long enough to kill the tunnel"
 
 echo
+echo "[5] TABLE-AWARE: on the device the endpoint loops via a SEPARATE 'tun0'"
+echo "    routing table (ip rule 13000), not main. The guard must pin the /32"
+echo "    into THAT table, or policy routing ignores a main-only fix."
+ip route add default dev tun0 table 100 2>/dev/null   # emulate the device's tun table
+# main-only pin would be invisible to a lookup that uses table 100:
+ip route replace "$EP/32" via 10.96.0.2 dev cell0 table 100
+got=$(ip route show table 100 2>/dev/null | awk -v e="$EP" '$1==e{for(i=1;i<=NF;i++)if($i=="dev")print $(i+1)}')
+eq "[5] /32 pinned into the looping table -> cellular" "$got" "cell0"
+ip route flush table 100 2>/dev/null
+
+echo
 echo "== sonuc: PASS=$pass FAIL=$fail =="
 [ "$fail" -eq 0 ] || exit 1

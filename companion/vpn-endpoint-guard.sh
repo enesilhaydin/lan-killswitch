@@ -57,17 +57,31 @@ setsid sh -c '
     }
 
     route_dev() { ip route get "$1" 2>/dev/null | head -1 | sed -n "s/.* dev \([^ ]*\).*/\1/p"; }
+    route_tbl() { ip route get "$1" 2>/dev/null | head -1 | sed -n "s/.* table \([^ ]*\).*/\1/p"; }
+
+    # Find how the cellular uplink itself reaches the world, so we can copy that
+    # next-hop for the endpoint. Look in the cellular iface own table first,
+    # then main. Echoes either "via <gw> dev <cif>" or "dev <cif>".
+    cell_nexthop() {
+        cif=$1
+        for t in "$cif" main; do
+            d=$(ip route show table "$t" 2>/dev/null | awk "/^default/{print; exit}")
+            [ -n "$d" ] && { echo "$d" | sed "s/^default //; s/ proto.*//; s/ scope.*//"; return 0; }
+        done
+        echo "dev $cif"
+    }
 
     pin_endpoint() {
         ep=$1; cif=$2
-        # Reuse the cellular default gateway if one exists, else a direct
-        # link-scope host route (point-to-point CGNAT uplinks have no gateway).
-        gw=$(ip route show table main 2>/dev/null | awk -v c="$cif" "/^default/ && \$5==c {print \$3; exit}")
-        if [ -n "$gw" ]; then
-            ip route replace "$ep/32" via "$gw" dev "$cif" 2>/dev/null
-        else
-            ip route replace "$ep/32" dev "$cif" scope link 2>/dev/null
-        fi
+        # Pin the /32 into the SAME table the endpoint is currently looping
+        # through (on ZTE that is the tun0 table via ip rule 13000, NOT main),
+        # so the very lookup that sends it into tun0 instead finds our cellular
+        # route. main-only pinning would be ignored by policy routing.
+        tbl=$(route_tbl "$ep"); [ -n "$tbl" ] || tbl=main
+        nh=$(cell_nexthop "$cif")
+        # try with the cellular next-hop; fall back to a plain dev route
+        ip route replace "$ep/32" $nh table "$tbl" 2>/dev/null \
+            || ip route replace "$ep/32" dev "$cif" table "$tbl" 2>/dev/null
     }
 
     while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
