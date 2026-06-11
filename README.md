@@ -303,6 +303,23 @@ exists *outside* that cycle so it can survive tunnel drops.
 
 ---
 
+## Companion helpers (optional, VPN routing layer)
+
+The kill switch protects the *tether* path. Two separate, common faults live in
+the *VPN routing* layer — not this module's job, but they look like "the hotspot
+broke," so optional self-healing helpers are provided under
+[`companion/`](companion/):
+
+| Helper | Fixes |
+|---|---|
+| `vpn-endpoint-guard.sh` | Hotspot works ~20-60s after connecting then **dies** — the WireGuard server endpoint's route loops back through `tun0`, so the handshake can't refresh. The guard pins a `/32` host route to the endpoint via cellular whenever it detects the loop. |
+| `vpn-gateway-watchdog.sh` | VPN connected but hotspot has **no internet** (often after an APN cycle) — NetD flushed the `tun0` MASQUERADE the routing module needs. The watchdog re-asserts it. |
+
+Both are zero-touch when healthy and safe-fail (do nothing if they can't act
+safely). They are **not** in the Magisk zip; install per
+[`companion/README.md`](companion/README.md). Confirm you need them first with
+`scripts/diag.sh` (look for `wg_endpoint_via_tunnel=LOOP_BAD`).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
