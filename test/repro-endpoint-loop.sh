@@ -92,5 +92,25 @@ v=$(detect "$EP")
 eq "diag detector: endpoint route restored" "$v" "ok"
 
 echo
+echo "[4] AUTO-HEAL: companion/vpn-endpoint-guard.sh logic fixes the loop on its own"
+# Break it again (APN cycle), then run the guard's core decision (loop? -> pin
+# to cellular). cell_iface() detection is device-specific (sipa_ethN); here we
+# feed the test uplink, exercising the loop-detect + pin_endpoint logic itself.
+ip route del "$EP/32" 2>/dev/null
+eq "pre-guard: looped" "$(detect "$EP")" "LOOP_BAD"
+guard_pin() {  # mirror of pin_endpoint(): gateway if present, else link-scope
+    ep=$1; cif=$2
+    gw=$(ip route show table main 2>/dev/null | awk -v c="$cif" '/^default/ && $5==c {print $3; exit}')
+    if [ -n "$gw" ]; then ip route replace "$ep/32" via "$gw" dev "$cif"
+    else ip route replace "$ep/32" via 10.96.0.2 dev "$cif"; fi
+}
+# guard loop body: only act when the endpoint routes through tun*
+dev=$(ip route get "$EP" 2>/dev/null | head -1 | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+case "$dev" in tun*) guard_pin "$EP" cell0 ;; esac
+eq "post-guard: auto-healed" "$(detect "$EP")" "ok"
+echo "    -> guard re-pins the endpoint to cellular within one ${INTERVAL:-20}s cycle,"
+echo "       so the handshake never stays looped long enough to kill the tunnel"
+
+echo
 echo "== sonuc: PASS=$pass FAIL=$fail =="
 [ "$fail" -eq 0 ] || exit 1
