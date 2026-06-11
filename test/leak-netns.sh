@@ -35,6 +35,7 @@ contract() {
     grep -q -- "-o tun+ -j RETURN"        "$f" || { echo "CONTRACT FAIL: 'tun+ RETURN' not in service.sh"; exit 2; }
     grep -q -- "-j REJECT --reject-with"  "$f" || { echo "CONTRACT FAIL: REJECT rule not in service.sh"; exit 2; }
     grep -q -- '-I FORWARD 1 -i "$iface" -j lan_killswitch' "$f" || { echo "CONTRACT FAIL: FORWARD hook not in service.sh"; exit 2; }
+    grep -q -- '-C lan_killswitch -o tun+ -j RETURN' "$f" || { echo "CONTRACT FAIL: ensure_chain integrity check not in service.sh"; exit 2; }
     echo "  contract OK (test rules match service.sh)"
 }
 
@@ -174,18 +175,22 @@ allow_lan() { # $1 = on|off
     done
 }
 
-relift() { # mirror of service.sh ensure_top(): drop all our hooks, reinsert on top
-    for ifc in br0 usb0; do
-        while $IPT -D FORWARD -i "$ifc" -j lan_killswitch 2>/dev/null; do :; done
-    done
-    for ifc in br0 usb0; do $IPT -I FORWARD 1 -i "$ifc" -j lan_killswitch; done
+# mirror of service.sh ensure_chain(): rebuild the chain if it is missing OR
+# has lost either required rule. Used to test v1.2.1 chain-integrity recovery.
+rebuild_chain_if_broken() {
+    if ! $IPT -L lan_killswitch -n >/dev/null 2>&1 \
+       || ! $IPT -C lan_killswitch -o tun+ -j RETURN 2>/dev/null \
+       || ! $IPT -C lan_killswitch -j REJECT --reject-with icmp-net-unreachable 2>/dev/null; then
+        $IPT -N lan_killswitch 2>/dev/null; $IPT -F lan_killswitch
+        $IPT -A lan_killswitch -o tun+ -j RETURN
+        $IPT -A lan_killswitch -j REJECT --reject-with icmp-net-unreachable
+    fi
 }
 
 p4() { ip netns exec "$1" ping  -c1 -W2 "$2" >/dev/null 2>&1; }
 p6() { ip netns exec "$1" ping6 -c1 -W2 "$2" >/dev/null 2>&1 || ip netns exec "$1" ping -6 -c1 -W2 "$2" >/dev/null 2>&1; }
 
 blk4()  { if p4 "$2" "$3"; then bad "$1 (gecti -> SIZINTI!)"; else ok "$1 (bloklandi)"; fi; }
-leak4() { if p4 "$2" "$3"; then ok "$1 (sizinti DOGRULANDI = tehlike gercek)"; else bad "$1 (sizmaliydi; test kurgusu hatali)"; fi; }
 psd4() { if p4 "$2" "$3"; then ok "$1 (gecti)"; else bad "$1 (bloklandi degil mi?)"; fi; }
 blk6() { if p6 "$2" "$3"; then bad "$1 (gecti -> SIZINTI!)"; else ok "$1 (bloklandi)"; fi; }
 psd6() { if p6 "$2" "$3"; then ok "$1 (gecti)"; else bad "$1 (bloklandi degil mi?)"; fi; }
@@ -226,15 +231,30 @@ psd4 "v4: istemci -> istemci2 (LAN-ici, allow-lan on)"  client 10.1.0.2
 blk4 "v4: istemci -> internet (allow-lan ON iken bile)" client 100.64.0.9
 
 echo
-echo "[E] DRIFT: yabanci ACCEPT hook'umuzun ustune girerse sizar; ensure_top geri kapatir"
+echo "[E] ORDER-INDEPENDENCE: vpn-gateway tarzi QUALIFIED (-o tun0) ACCEPT hook'un"
+echo "    ustune girse bile, VPN down iken sizinti YOK (v1.2.0 -> ensure_top'a gerek yok)"
 allow_lan off
 ip link set tun0 down
 route_v4 wan0
-blk4  "v4: baslangic (hook ustte)        " client 100.64.0.9
-$IPT -I FORWARD 1 -i br0 -j ACCEPT   # yabanci modul FORWARD'in en ustune ACCEPT soktu
-leak4 "v4: yabanci ACCEPT eklendi        " client 100.64.0.9
-relift                                # service.sh ensure_top() davranisi
-blk4  "v4: ensure_top sonrasi (geri kapal)" client 100.64.0.9
+# A real routing module (vpn-gateway) only ever inserts ACCEPTs qualified with
+# -o tun0 / -i tun0. Put one ABOVE our hook and prove order is irrelevant:
+# with the VPN down, tun0 has no route, the ACCEPT cannot match, and the packet
+# still reaches our REJECT.
+$IPT -I FORWARD 1 -s 10.0.0.0/24 -o tun0 -j ACCEPT
+blk4 "v4: qualified ACCEPT hook ustunde + VPN down -> hala blok" client 100.64.0.9
+$IPT -D FORWARD -s 10.0.0.0/24 -o tun0 -j ACCEPT
+
+echo
+echo "[F] CHAIN BUTUNLUK (v1.2.1): chain bozulursa ensure_chain yeniden kurar"
+# Sabotage: drop the tun+ RETURN. The chain now rejects EVERYTHING, incl. VPN
+# traffic -> the 'permanent outage even with VPN up' failure mode.
+$IPT -D lan_killswitch -o tun+ -j RETURN
+route_v4 tun0   # VPN up
+if p4 client 100.64.0.9; then bad "[F] sabote sonrasi VPN trafigi gecti (sabotaj islemedi mi?)"; else ok "[F] bozuk chain VPN trafigini reddediyor (beklenen)"; fi
+rebuild_chain_if_broken                                   # service.sh ensure_chain() davranisi
+psd4 "v4: ensure_chain rebuild -> VPN trafigi yeniden gecer" client 100.64.0.9
+ip link set tun0 down; route_v4 wan0
+blk4 "v4: rebuild sonrasi VPN down -> yine blok"             client 100.64.0.9
 
 echo
 echo "== sonuc: PASS=$pass FAIL=$fail =="

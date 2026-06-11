@@ -42,10 +42,15 @@ setsid sh -c '
     }
     release() { rmdir "$LOCK" 2>/dev/null; }
 
+    # Rebuild if the chain is missing OR exists but lost either required rule
+    # (empty -> leak; missing tun+ RETURN -> rejects VPN traffic too). See the
+    # fuller explanation in service.sh.
     ensure_chain() {
         local ipt=$1 r
         [ "$ipt" = "$IPT" ] && r="icmp-net-unreachable" || r="icmp6-no-route"
-        if ! $ipt -L lan_killswitch -n >/dev/null 2>&1; then
+        if ! $ipt -L lan_killswitch -n >/dev/null 2>&1 \
+           || ! $ipt -C lan_killswitch -o tun+ -j RETURN 2>/dev/null \
+           || ! $ipt -C lan_killswitch -j REJECT --reject-with $r 2>/dev/null; then
             $ipt -N lan_killswitch 2>/dev/null
             $ipt -F lan_killswitch
             $ipt -A lan_killswitch -o tun+ -j RETURN
