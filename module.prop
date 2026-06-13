@@ -1,6 +1,6 @@
 id=lan-killswitch
 name=LAN Kill Switch
-version=v1.2.4
-versionCode=11
+version=v1.2.5
+versionCode=12
 author=eiaydin
 description=Tethering-aware VPN kill switch for rooted Android, with WireGuard endpoint-loop guard, TCP MSS clamp, and tun+ MASQUERADE for full-tunnel hotspot VPN routing.

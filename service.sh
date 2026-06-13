@@ -38,6 +38,7 @@ INTERVAL=60
 ENDPOINT_GUARD="$MODDIR/endpoint-guard.sh"
 
 [ -f "$ENDPOINT_GUARD" ] && sh "$ENDPOINT_GUARD"
+export ENDPOINT_GUARD
 
 setsid sh -c '
     LOG="'"$LOG"'"
@@ -167,8 +168,26 @@ setsid sh -c '
         fi
     }
 
+    ensure_endpoint_guard() {
+        local pid cmd
+        [ -f "$ENDPOINT_GUARD" ] || return 0
+
+        pid=$(cat /data/adb/lan-killswitch-endpoint-guard.pid 2>/dev/null)
+        if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+            cmd=$(tr "\000" " " < "/proc/$pid/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *endpoint-guard.sh*"--loop"*) return 0 ;;
+            esac
+        fi
+
+        rm -f /data/adb/lan-killswitch-endpoint-guard.pid
+        sh "$ENDPOINT_GUARD"
+        log "restarted endpoint guard"
+    }
+
     sweep() {
         acquire || return
+        ensure_endpoint_guard
         ensure_chain $IPT
         ensure_chain $IPT6
         ensure_mss_clamp $IPT

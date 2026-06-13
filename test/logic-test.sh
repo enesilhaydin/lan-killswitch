@@ -36,6 +36,13 @@ grep -q -- '-C lan_killswitch -o tun+ -j RETURN' "$MOD/post-fs-data.sh"|| bad "p
 grep -q -- "\[\[:space:\]\]"          "$MOD/service.sh"     || bad "service.sh: [[:space:]] yok"
 grep -q -- "\[\[:space:\]\]"          "$MOD/post-fs-data.sh"|| bad "post-fs-data.sh: [[:space:]] yok"
 grep -q -- "endpoint-guard.sh"        "$MOD/service.sh"     || bad "service.sh: endpoint guard baslatmiyor"
+grep -q -- "ensure_endpoint_guard()"  "$MOD/service.sh"     || bad "service.sh: endpoint guard supervise edilmiyor"
+awk '
+    /sweep\(\) \{/ { in_sweep = 1 }
+    in_sweep && /ensure_endpoint_guard/ { found = 1 }
+    in_sweep && /^    \}/ { in_sweep = 0 }
+    END { exit found ? 0 : 1 }
+' "$MOD/service.sh" || bad "service.sh: sweep endpoint guard kontrol etmiyor"
 [ -f "$MOD/endpoint-guard.sh" ]                              || bad "endpoint-guard.sh yok"
 grep -q -- "--clamp-mss-to-pmtu"      "$MOD/service.sh"     || bad "service.sh: TCPMSS clamp yok"
 [ "$(grep -c -- "--clamp-mss-to-pmtu" "$MOD/service.sh")" -ge 2 ] || bad "service.sh: iki yonlu TCPMSS clamp yok"

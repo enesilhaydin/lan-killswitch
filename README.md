@@ -93,6 +93,10 @@ Since v1.2.4, the watchdog also keeps a single `nat/POSTROUTING -o tun+
 Mullvad, which expect forwarded hotspot packets to use the tunnel address
 instead of a LAN source like `192.168.0.x`.
 
+Since v1.2.5, the same watchdog also supervises `endpoint-guard.sh`. If Android
+kills that helper or its PID file goes stale, the next sweep starts it again so
+the WireGuard endpoint route cannot quietly fall back into `tun0`.
+
 The design is **independent of the VPN client lifecycle**. Whether the
 tunnel is up, down, restarting, or never been started, the rule stays in
 place. This is the key difference from putting the REJECT inside a VPN
@@ -197,6 +201,8 @@ reboot needed. Internet egress stays rejected either way.
   MTU blackholes over full-tunnel hotspot VPN.
 - **Tunnel MASQUERADE**: v1.2.4 keeps `-o tun+ -j MASQUERADE` present for
   strict providers such as Mullvad. It does not add APN/cellular NAT rules.
+- **Endpoint guard supervision**: v1.2.5 restarts the WireGuard endpoint-loop
+  helper if Android kills it after boot.
 - **IPv6**: covered (own ip6tables chain mirrors the v4 chain).
 
 ### WireGuard scope
@@ -331,8 +337,9 @@ exists *outside* that cycle so it can survive tunnel drops.
 
 The kill switch protects the *tether* path. Some faults live in the *VPN
 routing* layer and look like "the hotspot broke." v1.2.2 now includes the
-WireGuard endpoint-loop guard directly, and v1.2.4 includes the `tun+`
-MASQUERADE keepalive directly. The standalone helpers under
+WireGuard endpoint-loop guard directly, v1.2.4 includes the `tun+`
+MASQUERADE keepalive directly, and v1.2.5 supervises the endpoint guard from
+the main watchdog. The standalone helpers under
 [`companion/`](companion/) are kept for older installs and diagnostics:
 
 | Helper | Fixes |
